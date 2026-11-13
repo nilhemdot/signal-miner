@@ -55,8 +55,16 @@ def _quarter_dir(day: date) -> str:
     return f"{BASE}/{day.year}/QTR{(day.month - 1) // 3 + 1}"
 
 
+def _next_quarter_start(day: date) -> date:
+    q = (day.month - 1) // 3
+    return date(day.year + 1, 1, 1) if q == 3 else date(day.year, 3 * (q + 1) + 1, 1)
+
+
 def listed_form_index_dates(client: HttpClient, day: date) -> set[date]:
+    """Dates with a form index in the quarter containing `day`. An unpublished quarter lists nothing."""
     resp = client.get(f"{_quarter_dir(day)}/index.json")
+    if resp.status_code in (403, 404):  # EDGAR answers 403 for a directory that does not exist yet
+        return set()
     resp.raise_for_status()
     out = set()
     for item in resp.json()["directory"]["item"]:
@@ -69,8 +77,12 @@ def listed_form_index_dates(client: HttpClient, day: date) -> set[date]:
 def fetch_daily_index(client: HttpClient, day: date, keep: frozenset[str] = FORM_D_TYPES) -> IndexResult:
     listed = listed_form_index_dates(client, day)
     if day not in listed:
-        # A date before the newest listed file was a weekend or holiday; a later one is not published yet.
-        return IndexResult("ok" if listed and day < max(listed) else "pending")
+        # A date before a later published index was a weekend or holiday; otherwise it is not published yet.
+        if listed and day < max(listed):
+            return IndexResult("ok")
+        if listed_form_index_dates(client, _next_quarter_start(day)):
+            return IndexResult("ok")  # last days of a quarter: the next file landed in the next quarter
+        return IndexResult("pending")
     resp = client.get(f"{_quarter_dir(day)}/form.{day:%Y%m%d}.idx")
     resp.raise_for_status()
     return IndexResult("ok", parse_form_index(resp.text, keep))

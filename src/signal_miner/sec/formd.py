@@ -3,6 +3,7 @@
 Person names, street addresses and phone numbers are never read out of the document.
 """
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -33,6 +34,29 @@ class FormD:
     related_person_count: int
 
 
+class _DtdRefused(Exception):
+    pass
+
+
+def _refuse(*_args) -> None:
+    raise _DtdRefused("DTD or entity declaration not allowed")
+
+
+def _safe_fromstring(payload: bytes) -> ET.Element:
+    """Refuse any DOCTYPE or entity declaration (Form D never needs one), in any encoding, then parse.
+
+    The first expat pass sees declarations before any entity expands, so nothing is expanded.
+    """
+    scan = expat.ParserCreate()
+    scan.StartDoctypeDeclHandler = _refuse
+    scan.EntityDeclHandler = _refuse
+    try:
+        scan.Parse(payload, True)
+    except expat.ExpatError as exc:
+        raise ET.ParseError(str(exc)) from exc
+    return ET.fromstring(payload)
+
+
 def _text(root: ET.Element, path: str) -> str | None:
     el = root.find(path)
     if el is None or el.text is None:
@@ -57,12 +81,9 @@ def _money(value: str | None) -> tuple[Decimal | None, bool]:
 
 
 def parse_form_d(payload: bytes) -> FormD:
-    # Form D never needs a DTD; refusing one rules out entity-expansion tricks.
-    if b"<!DOCTYPE" in payload[:2048].upper():
-        raise FormDParseError("DOCTYPE not allowed")
     try:
-        root = ET.fromstring(payload)
-    except ET.ParseError as exc:
+        root = _safe_fromstring(payload)
+    except (ET.ParseError, _DtdRefused) as exc:
         raise FormDParseError(str(exc)) from exc
     if root.tag != "edgarSubmission":
         raise FormDParseError(f"unexpected root {root.tag!r}")

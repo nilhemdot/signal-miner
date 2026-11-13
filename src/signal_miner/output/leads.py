@@ -2,6 +2,7 @@
 import csv
 import io
 from datetime import date
+from decimal import Decimal
 
 import psycopg
 
@@ -12,18 +13,17 @@ LEAD_COLUMNS = ["rank", "score", "company", "domain", "domain_confidence", "stat
                 "why_now", "what_they_do", "evidence_urls"]
 MIN_SCORE = 20.0
 
+# Every Form D column comes from the signal that drove the score, so the CSV reflects the week as of `as_of`.
 _QUERY = """
-SELECT w.rank, w.score, c.name, c.domain, c.domain_confidence,
-       o.state, o.industry_group, o.amount_sold, o.latest_filed_date, o.date_of_first_sale,
-       (SELECT string_agg(DISTINCT s.signal_type, ';' ORDER BY s.signal_type) FROM sm.signals s WHERE s.company_id = c.company_id),
-       (SELECT string_agg(s.evidence_url, ';' ORDER BY s.observed_at DESC, s.evidence_url) FROM sm.signals s WHERE s.company_id = c.company_id)
+SELECT w.rank, w.score, c.name, c.domain, c.domain_confidence, c.hq_state,
+       best.details, best.observed_at::date,
+       (SELECT string_agg(DISTINCT s.signal_type, ';' ORDER BY s.signal_type)
+          FROM sm.signals s WHERE s.signal_id IN (SELECT jsonb_array_elements_text(w.components->'signal_ids')::bigint)),
+       (SELECT string_agg(s.evidence_url, ';' ORDER BY s.observed_at DESC, s.evidence_url)
+          FROM sm.signals s WHERE s.signal_id IN (SELECT jsonb_array_elements_text(w.components->'signal_ids')::bigint))
 FROM sm.weekly_scores w
 JOIN sm.companies c USING (company_id)
--- The offering shown is the company's largest raise among its newest filings.
-JOIN LATERAL (
-    SELECT * FROM sm.form_d_offerings o WHERE o.company_id = c.company_id
-    ORDER BY o.latest_filed_date DESC, o.amount_sold DESC NULLS LAST, o.file_number LIMIT 1
-) o ON true
+LEFT JOIN sm.signals best ON best.signal_id = (w.components->'best'->'form_d'->>'signal_id')::bigint
 WHERE w.week_start = %s AND w.score >= %s
 ORDER BY w.rank
 """
@@ -54,10 +54,13 @@ def form_d_leads_csv(conn: psycopg.Connection, as_of: date) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(LEAD_COLUMNS)
-    for (rank, sc, name, domain, conf, state, industry, sold, filed, first_sale, types, urls) in conn.execute(
+    for (rank, sc, name, domain, conf, state, details, filed, types, urls) in conn.execute(
         _QUERY, (week_start(as_of), MIN_SCORE)
     ):
-        w.writerow([rank, f"{sc:.2f}", name, domain or "", conf, state or "", industry or "", types or "",
-                    _fmt_amount(sold), filed.isoformat(), first_sale.isoformat() if first_sale else "",
-                    "", "", why_now(sold, filed), "", urls or ""])
+        d = details or {}
+        sold = Decimal(d["amount_sold"]) if d.get("amount_sold") is not None else None
+        w.writerow([rank, f"{sc:.2f}", name, domain or "", conf, d.get("state") or state or "",
+                    d.get("industry_group") or "", types or "", _fmt_amount(sold),
+                    filed.isoformat() if filed else "", d.get("first_sale") or "",
+                    "", "", why_now(sold, filed) if filed else "", "", urls or ""])
     return buf.getvalue()

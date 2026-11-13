@@ -68,3 +68,15 @@ def test_property_bounded_and_monotone(seed):
     assert 0.0 <= base <= 100.0 and not math.isnan(base)
     extra = _sig(rng.choice(sources), rng.random(), rng.randint(0, 50))
     assert score(sigs + [extra], AS_OF) >= base - 1e-9
+
+
+@pytest.mark.parametrize("gap, expected", [(90, 1.0), (91, 0.5)])
+def test_half_strength_starts_after_90_days(gap, expected):
+    filed = date(2026, 11, 6)
+    assert form_d_strength("form_d_raised", 25_000_000, filed, filed - timedelta(days=gap)) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("age, expected", [(28, 15.0), (29, 0.0)])
+def test_form_d_window_is_28_days_inclusive(age, expected):
+    # Age 28: 100 * 0.6 * 1.0 * 0.5^2 = 15.0. Age 29: outside the window.
+    assert score([_sig("form_d", 1.0, age)], AS_OF) == pytest.approx(expected)

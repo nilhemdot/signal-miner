@@ -45,6 +45,17 @@ def test_real_fund_and_old_issuer_fixtures_are_excluded():
     assert not passes_startup_filter(parse_form_d((FIX / "1929908_000192990826000003.xml").read_bytes()))
 
 
-def test_names_that_merely_contain_letters_are_not_excluded():
-    assert passes_startup_filter(dataclasses.replace(TECH, entity_name="Helpful Software Inc"))  # "lp" inside a word
-    assert passes_startup_filter(dataclasses.replace(TECH, entity_name="Refunding Labs Inc"))    # "fund" inside a word
+def test_lp_must_stand_alone_but_fund_and_spv_match_anywhere():
+    # Spec 4.1: the name must not contain "fund" or "spv"; "lp" only counts as a separate LP marker.
+    assert passes_startup_filter(dataclasses.replace(TECH, entity_name="Helpful Software Inc"))
+    assert passes_startup_filter(dataclasses.replace(TECH, entity_name="Alpine Labs Inc"))
+    for name in ("Refunding Labs Inc", "VentureFund Inc", "Acme Funds Inc", "Acme Partners, L.P.",
+                 "Acme Partners LP", "Acme Holdings L P", "SPVCo Inc"):
+        assert not passes_startup_filter(dataclasses.replace(TECH, entity_name=name)), name
+
+
+@pytest.mark.parametrize("state, ok", [("CA", True), ("DC", True), ("de", True), ("X0", False), ("2M", False),
+                                      ("A1", False), (None, False)])
+def test_only_us_issuers_pass(state, ok):
+    # EDGAR uses codes like X0 (United Kingdom) and 2M (Germany) for foreign issuers.
+    assert passes_startup_filter(dataclasses.replace(TECH, state=state)) is ok

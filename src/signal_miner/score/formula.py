@@ -14,6 +14,28 @@ class Sig:
     source: str
     strength: float
     observed_at: date
+    ref: object = None  # caller's handle on the stored signal
+
+
+def in_window(sig: Sig, as_of: date) -> bool:
+    age = (as_of - sig.observed_at).days
+    return 0 <= age <= WINDOW_DAYS[sig.source]
+
+
+def weighted(sig: Sig, as_of: date) -> float:
+    age = (as_of - sig.observed_at).days
+    return WEIGHTS[sig.source] * min(1.0, max(0.0, sig.strength)) * 0.5 ** (age / HALF_LIFE_DAYS)
+
+
+def best_per_source(signals: list[Sig], as_of: date) -> dict[str, tuple[float, Sig]]:
+    best: dict[str, tuple[float, Sig]] = {}
+    for sig in signals:
+        if not in_window(sig, as_of):
+            continue
+        p = weighted(sig, as_of)
+        if sig.source not in best or p > best[sig.source][0]:
+            best[sig.source] = (p, sig)
+    return best
 
 
 def amount_factor(sold) -> float:
@@ -41,14 +63,7 @@ def form_d_strength(signal_type: str, sold, filed: date, first_sale: date | None
 
 def score(signals: list[Sig], as_of: date) -> float:
     """100 * (1 - prod(1 - p_src)), where p_src is the best weighted, decayed signal per source."""
-    best: dict[str, float] = {}
-    for sig in signals:
-        age = (as_of - sig.observed_at).days
-        if age < 0 or age > WINDOW_DAYS[sig.source]:
-            continue
-        p = WEIGHTS[sig.source] * min(1.0, max(0.0, sig.strength)) * 0.5 ** (age / HALF_LIFE_DAYS)
-        best[sig.source] = max(best.get(sig.source, 0.0), p)
     remaining = 1.0
-    for p in best.values():
+    for p, _sig in best_per_source(signals, as_of).values():
         remaining *= 1.0 - p
     return 100.0 * (1.0 - remaining)

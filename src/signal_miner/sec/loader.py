@@ -4,10 +4,12 @@ Every write is an upsert that skips unchanged rows, so reloading a day changes 0
 """
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 import httpx
 import psycopg
 
+from signal_miner.http.client import RetryExhausted
 from signal_miner.er.normalize import normalize_name
 from signal_miner.http.client import HttpClient
 from signal_miner.score.formula import form_d_strength
@@ -25,6 +27,7 @@ class LoadStats:
     malformed: int = 0
     missing: int = 0
     no_file_number: int = 0
+    errors: int = 0
     changed: int = 0
 
 
@@ -74,7 +77,7 @@ WHERE (sm.form_d_filings.file_number, sm.form_d_filings.form_type, sm.form_d_fil
                      EXCLUDED.previous_accession, EXCLUDED.amount_sold)
 """
 
-_OFFERING_COLS = ["latest_accession", "latest_filed_date", "entity_name", "entity_type", "city", "state",
+_OFFERING_COLS = ["latest_accession", "latest_filed_date", "latest_form_type", "entity_name", "entity_type", "city", "state",
                   "year_of_inc_bucket", "industry_group", "revenue_range", "offering_amount", "offering_indefinite",
                   "amount_sold", "date_of_first_sale", "first_sale_yet_to_occur", "related_person_count",
                   "passes_startup_filter", "company_id"]
@@ -84,8 +87,13 @@ _UPSERT_OFFERING = f"""
 INSERT INTO sm.form_d_offerings (cik, file_number, {", ".join(_OFFERING_COLS)})
 VALUES (%(cik)s, %(file_number)s, {", ".join(f"%({c})s" for c in _OFFERING_COLS)})
 ON CONFLICT (cik, file_number) DO UPDATE SET {", ".join(f"{c} = EXCLUDED.{c}" for c in _OFFERING_COLS)}
-WHERE (EXCLUDED.latest_filed_date, EXCLUDED.latest_accession)
-          >= (sm.form_d_offerings.latest_filed_date, sm.form_d_offerings.latest_accession)
+WHERE (
+        EXCLUDED.latest_filed_date > sm.form_d_offerings.latest_filed_date
+     OR %(previous_accession)s = sm.form_d_offerings.latest_accession
+     OR (EXCLUDED.latest_filed_date = sm.form_d_offerings.latest_filed_date
+         AND (EXCLUDED.latest_form_type, EXCLUDED.latest_accession)
+             >= (sm.form_d_offerings.latest_form_type, sm.form_d_offerings.latest_accession))
+  )
   AND ({", ".join(f"sm.form_d_offerings.{c}" for c in _OFFERING_COLS)})
       IS DISTINCT FROM ({", ".join(f"EXCLUDED.{c}" for c in _OFFERING_COLS)})
 """
@@ -117,23 +125,33 @@ def _company_for(conn: psycopg.Connection, f: FormD) -> tuple[str, int]:
     return company_id, 2
 
 
-def _signal_for(conn, f: FormD, accession: str, filed: date) -> tuple[str, float] | None:
+def _previous_sold(conn, f: FormD, file_number: str) -> Decimal | None:
+    """Amount sold before this amendment: the filing it names, else the offering's stored state. None if unknown."""
+    if f.previous_accession:
+        row = conn.execute("SELECT amount_sold FROM sm.form_d_filings WHERE accession = %s", (f.previous_accession,)).fetchone()
+        if row:
+            return row[0] if row[0] is not None else Decimal(0)
+    row = conn.execute(
+        "SELECT amount_sold FROM sm.form_d_offerings WHERE cik = %s AND file_number = %s", (f.cik, file_number)
+    ).fetchone()
+    if row:
+        return row[0] if row[0] is not None else Decimal(0)
+    return None
+
+
+def _signal_for(f: FormD, filed: date, prev_sold: Decimal | None) -> tuple[str, float] | None:
     if not f.is_amendment:
-        if f.amount_sold and f.amount_sold > 0:
-            kind = "form_d_raised"
-        else:
-            kind = "form_d_filed"
+        kind = "form_d_raised" if f.amount_sold and f.amount_sold > 0 else "form_d_filed"
         return kind, form_d_strength(kind, f.amount_sold, filed, f.date_of_first_sale)
-    prev = conn.execute("SELECT amount_sold FROM sm.form_d_filings WHERE accession = %s", (f.previous_accession,)).fetchone()
-    prev_sold = prev[0] if prev and prev[0] is not None else 0
-    if f.amount_sold is not None and f.amount_sold > prev_sold:
+    # An amendment signals only a real increase over a known earlier amount.
+    if prev_sold is not None and f.amount_sold is not None and f.amount_sold > prev_sold:
         return "form_d_amend", form_d_strength("form_d_amend", f.amount_sold, filed, f.date_of_first_sale)
     return None
 
 
-def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, accession: str, fallback_day: date,
+def _load_one(conn, client, subs: _Submissions, stats: LoadStats, index_cik: int, accession: str, fallback_day: date,
               depth: int = 0) -> None:
-    parsed = _fetch_form_d(client, cik, accession)
+    parsed = _fetch_form_d(client, index_cik, accession)
     if parsed == "missing":
         stats.missing += 1
         return
@@ -141,6 +159,7 @@ def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, acce
         stats.malformed += 1
         return
     f: FormD = parsed
+    cik = f.cik  # the primary issuer; a co-issuer index row points at the same document
     meta = subs.lookup(cik, accession)
     file_number, filed = (meta[0], meta[1]) if meta else (None, fallback_day)
 
@@ -153,6 +172,7 @@ def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, acce
 
     stats.filings += 1
     form_type = "D/A" if f.is_amendment or f.submission_type == "D/A" else "D"
+    prev_sold = _previous_sold(conn, f, file_number) if (f.is_amendment and file_number) else None
     cur = conn.execute(_UPSERT_FILING, {
         "accession": accession, "cik": cik, "file_number": file_number, "form_type": form_type,
         "filed_date": filed, "previous_accession": f.previous_accession, "amount_sold": f.amount_sold,
@@ -170,6 +190,7 @@ def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, acce
 
     cur = conn.execute(_UPSERT_OFFERING, {
         "cik": cik, "file_number": file_number, "latest_accession": accession, "latest_filed_date": filed,
+        "latest_form_type": form_type, "previous_accession": f.previous_accession,
         "entity_name": f.entity_name, "entity_type": f.entity_type, "city": f.city, "state": f.state,
         "year_of_inc_bucket": f.year_of_inc_bucket, "industry_group": f.industry_group,
         "revenue_range": f.revenue_range, "offering_amount": f.offering_amount,
@@ -180,7 +201,7 @@ def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, acce
     stats.changed += cur.rowcount
 
     if passes:
-        sig = _signal_for(conn, f, accession, filed)
+        sig = _signal_for(f, filed, prev_sold)
         if sig:
             kind, strength = sig
             cur = conn.execute(_UPSERT_SIGNAL, {
@@ -191,33 +212,43 @@ def _load_one(conn, client, subs: _Submissions, stats: LoadStats, cik: int, acce
                     "file_number": file_number,
                     "first_sale": f.date_of_first_sale.isoformat() if f.date_of_first_sale else None,
                     "industry_group": f.industry_group,
+                    "state": f.state,
                 }),
             })
             stats.changed += cur.rowcount
 
 
 def ingest_filings(conn: psycopg.Connection, client: HttpClient, rows: list[IndexRow]) -> LoadStats:
+    """Load each accession once; one failing filing is counted and skipped, the rest still load."""
     stats = LoadStats()
     subs = _Submissions(client)
-    for row in sorted(rows, key=lambda r: (r.cik, r.date_filed, r.accession)):
-        if row.form_type not in FORM_D_TYPES:
+    seen = set()
+    for row in sorted(rows, key=lambda r: (r.date_filed, r.accession, r.cik)):
+        if row.form_type not in FORM_D_TYPES or row.accession in seen:
             continue
-        with conn.transaction():
-            _load_one(conn, client, subs, stats, row.cik, row.accession, row.date_filed)
+        seen.add(row.accession)
+        try:
+            with conn.transaction():
+                _load_one(conn, client, subs, stats, row.cik, row.accession, row.date_filed)
+        except (httpx.HTTPError, RetryExhausted):
+            stats.errors += 1
     return stats
 
 
 def ingest_day(conn: psycopg.Connection, client: HttpClient, day: date) -> tuple[str, LoadStats]:
+    """Status: ok, partial (some filings failed), or pending (index not published yet)."""
     result = fetch_daily_index(client, day)
     if result.status != "ok":
         return result.status, LoadStats()
-    return "ok", ingest_filings(conn, client, result.rows)
+    stats = ingest_filings(conn, client, result.rows)
+    return ("partial" if stats.errors else "ok"), stats
 
 
 def catch_up(conn: psycopg.Connection, client: HttpClient, today: date, max_days: int = 10) -> list[tuple[date, str, LoadStats]]:
-    """Ingest each of the last `max_days` days before `today` that has no successful run yet.
+    """Ingest each of the last `max_days` days before `today` without an ok run.
 
-    A day is recorded as done only when its index was published (status ok), so a pending day is retried next run.
+    Each day is attempted independently: a failed or partial day is recorded and retried on the next run,
+    and never blocks the days after it.
     """
     from datetime import timedelta
 
@@ -227,12 +258,18 @@ def catch_up(conn: psycopg.Connection, client: HttpClient, today: date, max_days
         job = f"form_d:{day.isoformat()}"
         if conn.execute("SELECT 1 FROM sm.runs WHERE job = %s AND status = 'ok'", (job,)).fetchone():
             continue
-        status, stats = ingest_day(conn, client, day)
-        if status == "ok":
+        try:
+            status, stats = ingest_day(conn, client, day)
+        except (httpx.HTTPError, RetryExhausted) as exc:
+            status, stats = "failed", LoadStats(errors=1)
+            error = str(exc)[:500]
+        else:
+            error = None
+        if status != "pending":
             with conn.transaction():
                 conn.execute(
-                    "INSERT INTO sm.runs (job, status, finished_at, stats) VALUES (%s, 'ok', now(), %s)",
-                    (job, psycopg.types.json.Jsonb(stats.__dict__)),
+                    "INSERT INTO sm.runs (job, status, finished_at, stats, error) VALUES (%s, %s, now(), %s, %s)",
+                    (job, status, psycopg.types.json.Jsonb(stats.__dict__), error),
                 )
         done.append((day, status, stats))
     return done

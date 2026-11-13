@@ -53,8 +53,14 @@ Fields kept are the columns in section 5.
   - withinFiveYears or yetToBeFormed.
   - Industry is Computers, Telecommunications, Other Technology or Business Services.
   - Not a Pooled Investment Fund or Limited Partnership.
-  - The name does not contain `fund`, `spv` or ` lp`.
+  - The name does not contain `fund` or `spv`, and has no separate LP marker (`LP`, `L.P.`, `L P`).
+  - The issuer's state is a US state or DC. EDGAR codes such as `X0` (United Kingdom) and `2M` (Germany) mark foreign issuers.
 - Dedupe: an offering is (cik, file_number), and its latest filing is the current state. CIK 2163963 filed 2 offerings on 2026-11-06.
+  - "Latest" means the later filed date. On the same date, a D/A beats a D, and a filing that names the stored one as its previous accession wins.
+  - Accession numbers are never compared across prefixes, because agents file under their own CIK.
+  - An index row is loaded once per accession, keyed on the primary issuer in the XML. Co-issuer rows point at the same document.
+- A failing filing is counted and skipped, and its day is recorded `partial` and retried on the next run. A failing day never blocks later days.
+- A weekend at a quarter's end resolves through the next quarter's listing.
 
 ### 4.2 HN "Ask HN: Who is hiring?"
 - Thread: `https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring`. Keep titles that start with `Ask HN: Who is hiring?`.
@@ -175,6 +181,7 @@ Jobs run on GitHub Actions in a private repo. They connect through the Supavisor
    - Verifier: drops a claim whose URL was not fetched this run, or whose quote is missing from the cached text. A newsletter claim also needs a sec.gov URL or 2 domains.
 8. **Output.**
    - The CSV and the Markdown draft are built from `weekly_leads`.
+   - Only signals observed on or before `as_of` and inside their window count. The Form D columns come from the signal that drove the score, so a past week's CSV never changes.
    - Each newsletter company gets a structured line (amount, signals, EDGAR link), even when 0 claims survive.
    - A banner lists degraded sources.
 
@@ -184,7 +191,7 @@ Jobs run on GitHub Actions in a private repo. They connect through the Supavisor
 |---|---|---|
 | form_d_raised | Filtered offering, original D in window, sold > 0 | `0.5 + 0.5a`, `a = clamp(log10(sold/250,000)/2, 0, 1)` |
 | form_d_filed | Original D, sold 0 or yetToOccur | 0.4, labelled "filed, $0 sold" |
-| form_d_amend | D/A with sold above the previous filing | `0.3 + 0.3a` |
+| form_d_amend | D/A with sold above the previous filing (the named previous accession, else the stored offering; no signal without a known previous amount) | `0.3 + 0.3a` |
 | hn_post | Thread from the last 45 days | `0.6 + 0.2·funding + 0.2·tool` |
 | jobs_tools | Confirmed board | `0.7·min(1, n_tool/3) + 0.3·min(1, n_new/10)`; migration phrase → 1 |
 | gh_accel | ratio ≥ 2, events ≥ 30, actors ≥ 3, 4 non-zero baseline weeks, domain ≥ medium | `min(1, log2(ratio)/3)` |
@@ -345,7 +352,8 @@ The slices total 13.5 days. If slice 7 slips, the github term scores 0 and the o
 5. Who runs the GDPR and CCPA review before the first outbound use?
 6. Should the filter add Biotechnology and Other Health Care?
 7. Supabase Free with the heartbeat, or Pro (price not checked)?
-8. Does the private repo have enough Actions minutes (not checked)? If not, the backfill runs locally.
+8. Resolved: the repo is public (nilhemdot/signal-miner), so Actions minutes are unlimited.
+9. Should tiny raises qualify? `a` clamps to 0 below $250K, so a $5,000 raise scores 21.2 at 7 days and clears the 20 cut. On 2026-11-06, 5 of 14 leads raised under $170K.
 
 ## 13. Unverified assumptions
 

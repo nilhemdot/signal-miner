@@ -17,6 +17,8 @@ def mock_sec(router: respx.Router) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/index.json") and "daily-index" in path:
+            if "/2026/QTR4/" not in path:
+                return httpx.Response(403)  # EDGAR's answer for a quarter that has no directory yet
             return httpx.Response(200, content=(FIX / "index.json").read_bytes())
         if "daily-index" in path:
             f = FIX / path.rsplit("/", 1)[1]

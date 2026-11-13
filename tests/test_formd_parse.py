@@ -57,3 +57,16 @@ def test_malformed_xml_raises_a_typed_error(payload):
 def test_parser_never_returns_person_names():
     f = _load("2153109_000215310926000002.xml")
     assert not any(hasattr(f, a) for a in ("related_persons", "signature_name", "first_name"))
+
+
+def test_doctype_after_padding_is_refused():
+    body = (FIX / "2162824_000216282426000002.xml").read_bytes()
+    bomb = b'<?xml version="1.0"?><!--' + b"x" * 2100 + b'--><!DOCTYPE d [<!ENTITY a "aaaa">]>' + body.split(b"?>", 1)[1]
+    with pytest.raises(FormDParseError):
+        parse_form_d(bomb)
+
+
+def test_utf16_doctype_is_refused():
+    doc = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE d [<!ENTITY a "aaaa">]><edgarSubmission/>'
+    with pytest.raises(FormDParseError):
+        parse_form_d(doc.encode("utf-16"))
