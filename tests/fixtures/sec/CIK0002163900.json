@@ -1,0 +1,26 @@
+{
+ "cik": "0002163900",
+ "name": "Boring Radiology, Inc.",
+ "entityType": "other",
+ "stateOfIncorporation": "DE",
+ "filings": {
+  "recent": {
+   "accessionNumber": [
+    "0002163900-26-000001"
+   ],
+   "filingDate": [
+    "2026-11-06"
+   ],
+   "form": [
+    "D"
+   ],
+   "fileNumber": [
+    "021-603904"
+   ],
+   "primaryDocument": [
+    "xslFormDX01/primary_doc.xml"
+   ]
+  },
+  "files": []
+ }
+}

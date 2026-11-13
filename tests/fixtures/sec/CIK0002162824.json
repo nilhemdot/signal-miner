@@ -1,0 +1,31 @@
+{
+ "cik": "0002162824",
+ "name": "Agency Tool Co",
+ "entityType": "other",
+ "stateOfIncorporation": "DE",
+ "filings": {
+  "recent": {
+   "accessionNumber": [
+    "0002162824-26-000002",
+    "0002162824-26-000001"
+   ],
+   "filingDate": [
+    "2026-11-06",
+    "2026-11-06"
+   ],
+   "form": [
+    "D",
+    "D"
+   ],
+   "fileNumber": [
+    "021-603938",
+    "021-603930"
+   ],
+   "primaryDocument": [
+    "xslFormDX01/primary_doc.xml",
+    "xslFormDX01/primary_doc.xml"
+   ]
+  },
+  "files": []
+ }
+}

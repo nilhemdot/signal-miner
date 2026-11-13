@@ -5,4 +5,4 @@ __pycache__/
 .pytest_cache/
 
 # Local editor-plugin session state
-.clawness/*sessions.json
+.clawness/*.json

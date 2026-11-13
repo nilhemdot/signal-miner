@@ -25,3 +25,6 @@ packages = ["src/signal_miner"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[project.scripts]
+signal-miner = "signal_miner.cli:main"
