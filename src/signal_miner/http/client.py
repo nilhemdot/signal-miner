@@ -1,7 +1,9 @@
 """One HTTP client for every source: per-host pacing, bounded retries, explicit timeouts."""
 import email.utils
+import random
 import threading
 import time
+from datetime import timezone
 from urllib.parse import urlsplit
 
 import httpx
@@ -42,18 +44,20 @@ class FakeClock:
 
 
 def parse_retry_after(value: str | None, now_epoch: float | None = None) -> float | None:
-    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date), capped."""
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
     if not value:
         return None
     value = value.strip()
     if value.isdigit():
-        return min(float(value), MAX_RETRY_AFTER_S)
+        return float(value)
     try:
         when = email.utils.parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
+    if when.tzinfo is None:  # "-0000" parses as naive; HTTP dates are always UTC
+        when = when.replace(tzinfo=timezone.utc)
     now_epoch = time.time() if now_epoch is None else now_epoch
-    return min(max(0.0, when.timestamp() - now_epoch), MAX_RETRY_AFTER_S)
+    return max(0.0, when.timestamp() - now_epoch)
 
 
 class HttpClient:
@@ -66,6 +70,7 @@ class HttpClient:
         host_groups: dict[str, str] | None = None,
         default_interval: float = 1.0,
         max_tries: int = 5,
+        jitter=random.random,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
         headers: dict[str, str] | None = None,
         transport: httpx.BaseTransport | None = None,
@@ -73,6 +78,7 @@ class HttpClient:
         self.clock = clock or RealClock()
         self.timeout = timeout
         self.max_tries = max_tries
+        self._jitter = jitter
         self._intervals = dict(host_intervals or {})
         self._groups = dict(host_groups or {})
         self._default_interval = default_interval
@@ -95,19 +101,35 @@ class HttpClient:
         if slot > now:
             self.clock.sleep(slot - now)
 
+    def _hold_host(self, host: str, seconds: float) -> None:
+        """Push the host's next slot out, so every thread waits, not only the one that got the 429."""
+        key = self._groups.get(host, host)
+        with self._lock:
+            now = self.clock.monotonic()
+            self._next_slot[key] = max(self._next_slot.get(key, now), now + seconds)
+
     def get(self, url: str, **kwargs) -> httpx.Response:
+        """GET with retries on 429, 5xx, timeouts and connection errors. GET is idempotent, so retrying is safe."""
         host = urlsplit(url).hostname or ""
         last_status = None
         for attempt in range(1, self.max_tries + 1):
             self._pace(host)
-            resp = self._http.get(url, **kwargs)
-            if resp.status_code not in RETRY_STATUSES:
+            try:
+                resp = self._http.get(url, **kwargs)
+            except httpx.TransportError:  # includes every TimeoutException
+                resp = None
+            if resp is not None and resp.status_code not in RETRY_STATUSES:
                 return resp
-            last_status = resp.status_code
+            last_status = resp.status_code if resp is not None else None
             if attempt == self.max_tries:
                 break
-            wait = parse_retry_after(resp.headers.get("Retry-After"))
-            self.clock.sleep(wait if wait is not None else min(2.0 ** attempt, 30.0))
+            wait = parse_retry_after(resp.headers.get("Retry-After")) if resp is not None else None
+            if wait is not None and wait > MAX_RETRY_AFTER_S:
+                # Waiting that long would stall the run; sending early would break the server's ask.
+                raise RetryExhausted(url, last_status)
+            if wait is None:
+                wait = min(2.0 ** attempt, 30.0) * (0.5 + self._jitter() / 2)
+            self._hold_host(host, wait)
         raise RetryExhausted(url, last_status)
 
     def close(self) -> None:

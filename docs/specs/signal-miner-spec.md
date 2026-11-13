@@ -161,7 +161,7 @@ Jobs run on GitHub Actions in a private repo. They connect through the Supavisor
 6. **Score** (section 7).
 7. **Enrich** the top 25 eligible companies.
    - Isolation: a separate `enrich` process gets only ANTHROPIC_API_KEY, PATH, HOME, ROUTER_URL and ROUTER_TOKEN. The parent process keeps the provider keys and serves `web_search` and `web_fetch` as a local MCP server.
-   - Runs: one `claude-agent-sdk==0.2.179` `query()` per company, 2 at a time, with `max_turns=12`, at most 6 searches and at most 10 fetches.
+   - Runs: one `claude-agent-sdk==0.2.181` `query()` per company, 2 at a time, with `max_turns=12`, at most 6 searches and at most 10 fetches.
    - Lockdown, 3 layers:
      - `allowed_tools` lists only `web_search` and `web_fetch`.
      - `disallowed_tools` lists Bash, Write, Edit, NotebookEdit, WebFetch, WebSearch and Task.
@@ -228,7 +228,9 @@ Each paid call first reserves units in `api_usage` inside a transaction. A reser
 - Secrets live in GitHub Actions secrets and are masked in logs. v1 uses no Supabase API key.
 - The agent process holds no DB credentials, PAT or provider keys. Injected text can reach an output only through a fetched URL with a matching quote.
 - No person names or HN handles are stored. Emails and phone numbers are redacted.
-- Deleting a company cascades to every related row.
+- Deleting a company cascades to every row that references it. Two tables are exempt because they hold no company link:
+  - `gh_org_weekly`: org-level aggregates, kept 12 weeks.
+  - `form_d_filings`: public SEC records keyed by accession.
 - `suppression` records CAN-SPAM opt-outs and blocks those domains from export.
 - A GDPR legitimate-interest assessment and a CCPA data-broker review come before the first outbound use (Q5).
 
@@ -303,16 +305,16 @@ Fixtures are trimmed real responses from 2026-11-09. [live] marks a check that r
 
 ## 11. Slices
 
-Each slice is built test-first, and CI must be green before merge. CI uses a Postgres 15 container.
+Each slice is built test-first, and CI must be green before merge. CI uses a Postgres 15 container and asserts the server major version. Local runs use Postgres 16.
 
 Pins (Python 3.12):
 
 | Package | Version |
 |---|---|
 | httpx | 0.28.1 |
-| psycopg[binary] | 3.3.8 |
+| psycopg[binary] | 3.3.9 |
 | pydantic | 2.14.3 |
-| claude-agent-sdk | 0.2.179 |
+| claude-agent-sdk | 0.2.181 |
 | tinyfish | 0.11.0 |
 | tavily-python | 0.8.5 |
 | exa-py | 2.28.0 |

@@ -1,4 +1,6 @@
 """AC 27: roles, RLS, no contact-data columns, dump and restore."""
+import os
+import re
 import shutil
 import subprocess
 
@@ -65,14 +67,24 @@ def test_rls_enabled_on_every_table_without_force(writer):
         assert not forced, name
 
 
+CONTACT_COLUMN = re.compile(r"e_?mail|phone|mobile|\btel\b|_tel$|^tel_|address|addr|street|zip|postal")
+# Holds a bare domain (acme.io), never a mailbox; AC 8 checks stored text for real addresses.
+CONTACT_ALLOWLIST = {("gh_orgs", "email_domain")}
+
+
 def test_no_column_is_named_for_contact_data(writer):
     cols = writer.execute(
         "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'sm'"
     ).fetchall()
-    banned = ("email", "phone", "address")
-    for table, col in cols:
-        for word in banned:
-            assert col != word and not col.endswith(f"_{word}"), f"{table}.{col}"
+    offenders = [(t, c) for t, c in cols if CONTACT_COLUMN.search(c) and (t, c) not in CONTACT_ALLOWLIST]
+    assert offenders == []
+
+
+def test_contact_column_pattern_catches_common_names():
+    for name in ("email", "contact_email", "e_mail", "phone", "mobile", "tel", "street", "zip_code", "addr", "postal_code"):
+        assert CONTACT_COLUMN.search(name), name
+    for name in ("domain", "hq_state", "title", "total", "hotel_count"):
+        assert not CONTACT_COLUMN.search(name), name
 
 
 def test_pg_trgm_lives_in_extensions_schema(writer):
@@ -89,19 +101,55 @@ def test_migrations_are_idempotent(db_dsn):
     assert apply_migrations(db_dsn) == []
 
 
-def test_dump_restores_into_empty_database(db_dsn, make_db):
-    pg_dump, psql = shutil.which("pg_dump"), shutil.which("psql")
-    assert pg_dump and psql
-    dump = subprocess.run([pg_dump, "--no-owner", "--schema=sm", "--schema=sm_meta", db_dsn],
-                          capture_output=True, text=True, check=True, timeout=60).stdout
+def _restore(dump: str, make_db) -> str:
     target = make_db(migrate=False)
     with psycopg.connect(target, autocommit=True) as conn:
         conn.execute("CREATE SCHEMA IF NOT EXISTS extensions")
         conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA extensions")
         conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions")
-    res = subprocess.run([psql, "-v", "ON_ERROR_STOP=1", "-q", target], input=dump,
+    res = subprocess.run([shutil.which("psql"), "-v", "ON_ERROR_STOP=1", "-q", target], input=dump,
                          capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
+    return target
+
+
+def test_dump_restores_into_empty_database_and_stays_usable(db_dsn, make_db):
+    """AC 27. CI runs this against Postgres 15 (SM_REQUIRE_PG_MAJOR=15); locally it runs on whatever server is up."""
+    want = os.environ.get("SM_REQUIRE_PG_MAJOR")
+    with psycopg.connect(db_dsn) as conn:
+        major = conn.info.server_version // 10000
+    if want:
+        assert major == int(want)
+    pg_dump = shutil.which("pg_dump")
+    assert pg_dump and shutil.which("psql")
+    # Run the dump as the owner role, the way the weekly backup job does (spec section 6).
+    dump = subprocess.run([pg_dump, "--role=pipeline_writer", "--schema=sm", "--schema=sm_meta", db_dsn],
+                          capture_output=True, text=True, check=True, timeout=60).stdout
+    target = _restore(dump, make_db)
     with psycopg.connect(target) as conn:
-        n = conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'sm'").fetchone()[0]
-    assert n == len(SM_TABLES)
+        assert conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'sm'").fetchone()[0] == len(SM_TABLES)
+        conn.execute("SET ROLE pipeline_writer")
+        conn.execute("INSERT INTO sm.suppression (domain, reason) VALUES ('restored.example', 'test')")
+        assert conn.execute("SELECT count(*) FROM sm.suppression").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM sm_meta.applied").fetchone()[0] >= 1
+        conn.rollback()
+        conn.execute("SET ROLE anon")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("SELECT 1 FROM sm.companies")
+
+
+def test_pipeline_login_is_a_least_privilege_member(db_dsn):
+    with psycopg.connect(db_dsn) as conn:
+        row = conn.execute(
+            """SELECT rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls,
+                      pg_has_role('pipeline_login', 'pipeline_writer', 'MEMBER')
+               FROM pg_roles WHERE rolname = 'pipeline_login'"""
+        ).fetchone()
+    assert row == (True, False, False, False, False, True)
+
+
+def test_missing_migrations_directory_fails_loudly(db_dsn, tmp_path):
+    from signal_miner.db.migrate import NoMigrationsFound, apply_migrations
+
+    with pytest.raises(NoMigrationsFound):
+        apply_migrations(db_dsn, directory=tmp_path)

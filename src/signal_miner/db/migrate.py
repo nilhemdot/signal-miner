@@ -1,9 +1,14 @@
 """Apply migrations/NNN_*.sql in order, once each, tracked in sm_meta.applied."""
+from importlib import resources
 from pathlib import Path
 
 import psycopg
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+MIGRATIONS_DIR = Path(str(resources.files("signal_miner.migrations")))
+
+
+class NoMigrationsFound(RuntimeError):
+    pass
 
 _BOOTSTRAP = """
 CREATE SCHEMA IF NOT EXISTS sm_meta;
@@ -19,6 +24,8 @@ REVOKE ALL ON SCHEMA sm_meta FROM PUBLIC;
 def apply_migrations(dsn: str, directory: Path = MIGRATIONS_DIR) -> list[str]:
     """Apply pending migrations as the connecting admin role. Returns the names applied."""
     files = sorted(directory.glob("[0-9][0-9][0-9]_*.sql"))
+    if not files:
+        raise NoMigrationsFound(f"no NNN_*.sql files in {directory}")
     applied_now = []
     with psycopg.connect(dsn) as conn:
         conn.execute(_BOOTSTRAP)

@@ -52,7 +52,7 @@ def test_retry_after_is_honored_on_429():
     client = make_sec_client(env={"SEC_USER_AGENT": UA}, clock=clock)
     assert client.get("https://www.sec.gov/y").status_code == 200
     assert route.call_count == 2
-    assert 7 in clock.sleeps
+    assert clock.monotonic() >= 7
 
 
 @respx.mock
@@ -94,6 +94,68 @@ def test_retry_after_http_date_and_cap():
     from signal_miner.http.client import parse_retry_after
 
     assert parse_retry_after("Wed, 21 Oct 2015 07:28:10 GMT", now_epoch=1445412480) == pytest.approx(10.0)
-    assert parse_retry_after("100000") == 120.0
+    assert parse_retry_after("Wed, 21 Oct 2015 07:28:10 -0000", now_epoch=1445412480) == pytest.approx(10.0)
+    assert parse_retry_after("100000") == 100000.0
     assert parse_retry_after("garbage") is None
     assert parse_retry_after(None) is None
+
+
+@respx.mock
+def test_retry_after_over_cap_gives_up_without_sending_early():
+    route = respx.get("https://www.sec.gov/slow").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "600"})
+    )
+    client = make_sec_client(env={"SEC_USER_AGENT": UA}, clock=FakeClock())
+    with pytest.raises(RetryExhausted):
+        client.get("https://www.sec.gov/slow")
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_timeouts_and_connection_errors_are_retried():
+    route = respx.get("https://api.example.com/flaky").mock(
+        side_effect=[httpx.ReadTimeout("slow"), httpx.ConnectError("refused"), httpx.Response(200)]
+    )
+    client = HttpClient(user_agent=UA, clock=FakeClock())
+    assert client.get("https://api.example.com/flaky").status_code == 200
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_persistent_timeouts_raise_retry_exhausted():
+    route = respx.get("https://api.example.com/dead").mock(side_effect=httpx.ConnectTimeout("x"))
+    client = HttpClient(user_agent=UA, clock=FakeClock())
+    with pytest.raises(RetryExhausted):
+        client.get("https://api.example.com/dead")
+    assert route.call_count == 5
+
+
+@respx.mock
+def test_retry_after_holds_the_host_for_every_caller():
+    """A 429 seen by one thread pauses the whole SEC host group for every thread (real clock, ~1 s)."""
+    import threading
+    import time
+
+    from signal_miner.http.client import RealClock
+
+    first_429_at = []
+    b_sent_at = []
+
+    def on_a(request):
+        if not first_429_at:
+            first_429_at.append(time.monotonic())
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(200)
+
+    respx.get("https://www.sec.gov/a").mock(side_effect=on_a)
+    respx.get("https://data.sec.gov/b").mock(side_effect=lambda r: b_sent_at.append(time.monotonic()) or httpx.Response(200))
+    client = make_sec_client(env={"SEC_USER_AGENT": UA}, clock=RealClock())
+
+    t = threading.Thread(target=client.get, args=("https://www.sec.gov/a",))
+    t.start()
+    while not first_429_at:
+        time.sleep(0.01)
+    time.sleep(0.2)  # the other thread asks during the pause
+    client.get("https://data.sec.gov/b")
+    t.join(timeout=10)
+    assert b_sent_at[0] - first_429_at[0] >= 0.95

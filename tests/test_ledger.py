@@ -105,3 +105,37 @@ def test_route_returns_skipped_budget_when_every_provider_is_spent(ledger_conn):
     _cap(ledger_conn, "tavily", "month", 0)
     provider, rid = route(ledger_conn, [Call("tinyfish", 1), Call("tavily", 1), Call("exa", 1)], now=NOW)
     assert provider == SKIPPED_BUDGET and rid is None
+
+
+def test_fractional_units_are_reserved_exactly(ledger_conn):
+    _cap(ledger_conn, "claude", "week", 10)
+    for _ in range(25):
+        assert reserve(ledger_conn, "claude", units=0.4, now=NOW) is not None
+    assert reserve(ledger_conn, "claude", units=0.4, now=NOW) is None
+    assert _used(ledger_conn, "claude") == 10
+
+
+def test_a_reservation_stamped_later_still_counts(ledger_conn):
+    _cap(ledger_conn, "exa", "month", 5)
+    assert reserve(ledger_conn, "exa", units=5, now=NOW + timedelta(seconds=2))
+    assert reserve(ledger_conn, "exa", units=5, now=NOW) is None
+
+
+def test_hourly_cap_is_rolling_across_the_hour_boundary(ledger_conn):
+    _cap(ledger_conn, "tinyfish", "hour", 2)
+    edge = datetime(2026, 11, 13, 12, 59, tzinfo=timezone.utc)
+    assert reserve(ledger_conn, "tinyfish", units=2, now=edge)
+    assert reserve(ledger_conn, "tinyfish", units=1, now=edge + timedelta(minutes=2)) is None
+    assert reserve(ledger_conn, "tinyfish", units=1, now=edge + timedelta(minutes=61))
+
+
+def test_window_starts():
+    from signal_miner.ledger.ledger import window_start
+
+    thu = datetime(2026, 11, 12, 15, 30, tzinfo=timezone.utc)
+    assert window_start("week", thu) == datetime(2026, 11, 9, tzinfo=timezone.utc)
+    assert window_start("month", thu) == datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert window_start("day", thu) == datetime(2026, 11, 12, tzinfo=timezone.utc)
+    assert window_start("minute", thu) == thu - timedelta(minutes=1)
+    with pytest.raises(ValueError):
+        window_start("year", thu)

@@ -279,3 +279,19 @@ $$;
 ALTER DEFAULT PRIVILEGES IN SCHEMA sm REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
 
 RESET ROLE;
+
+-- Migration bookkeeping belongs to pipeline_writer too, so the owner-role backup (pg_dump) can read it.
+ALTER SCHEMA sm_meta OWNER TO pipeline_writer;
+ALTER TABLE sm_meta.applied OWNER TO pipeline_writer;
+
+-- Pipeline jobs log in as pipeline_login, which only inherits pipeline_writer.
+-- Its password is set out of band (ALTER ROLE ... PASSWORD), never in a migration.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pipeline_login') THEN
+        CREATE ROLE pipeline_login LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS INHERIT;
+    END IF;
+END
+$$;
+GRANT pipeline_writer TO pipeline_login;
+ALTER ROLE pipeline_login SET search_path = sm, extensions;
