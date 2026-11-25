@@ -7,6 +7,8 @@ WEIGHTS = {"form_d": 0.6, "jobs": 0.5, "hn": 0.4, "github": 0.3}
 WINDOW_DAYS = {"form_d": 28, "jobs": 28, "hn": 45, "github": 28}
 HALF_LIFE_DAYS = 14
 STALE_FIRST_SALE_DAYS = 90
+# A reported raise below this amount creates no form_d_raised or form_d_amend signal (spec section 7).
+MIN_RAISED_USD = 100_000
 
 
 @dataclass(frozen=True)

@@ -4,5 +4,7 @@ __pycache__/
 .env
 .pytest_cache/
 
-# Local editor-plugin session state
-.clawness/*.json
+# Clawness — per-machine session state (memory.md and rules/ stay shared)
+.clawness/*
+!.clawness/memory.md
+!.clawness/rules/

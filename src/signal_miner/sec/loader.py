@@ -12,7 +12,7 @@ import psycopg
 from signal_miner.http.client import RetryExhausted
 from signal_miner.er.normalize import normalize_name
 from signal_miner.http.client import HttpClient
-from signal_miner.score.formula import form_d_strength
+from signal_miner.score.formula import MIN_RAISED_USD, form_d_strength
 from signal_miner.sec.filter import passes_startup_filter
 from signal_miner.sec.formd import FormD, FormDParseError, parse_form_d
 from signal_miner.sec.index import FORM_D_TYPES, IndexRow, fetch_daily_index
@@ -140,11 +140,15 @@ def _previous_sold(conn, f: FormD, file_number: str) -> Decimal | None:
 
 
 def _signal_for(f: FormD, filed: date, prev_sold: Decimal | None) -> tuple[str, float] | None:
+    sold = f.amount_sold or 0
     if not f.is_amendment:
-        kind = "form_d_raised" if f.amount_sold and f.amount_sold > 0 else "form_d_filed"
-        return kind, form_d_strength(kind, f.amount_sold, filed, f.date_of_first_sale)
-    # An amendment signals only a real increase over a known earlier amount.
-    if prev_sold is not None and f.amount_sold is not None and f.amount_sold > prev_sold:
+        if sold <= 0:
+            return "form_d_filed", form_d_strength("form_d_filed", sold, filed, f.date_of_first_sale)
+        if sold < MIN_RAISED_USD:
+            return None
+        return "form_d_raised", form_d_strength("form_d_raised", sold, filed, f.date_of_first_sale)
+    # An amendment signals only a real increase over a known earlier amount, to a total of at least the minimum.
+    if prev_sold is not None and sold > prev_sold and sold >= MIN_RAISED_USD:
         return "form_d_amend", form_d_strength("form_d_amend", f.amount_sold, filed, f.date_of_first_sale)
     return None
 

@@ -189,9 +189,9 @@ Jobs run on GitHub Actions in a private repo. They connect through the Supavisor
 
 | Signal | Fires when | Strength s |
 |---|---|---|
-| form_d_raised | Filtered offering, original D in window, sold > 0 | `0.5 + 0.5a`, `a = clamp(log10(sold/250,000)/2, 0, 1)` |
+| form_d_raised | Filtered offering, original D in window, sold ≥ $100,000 (a smaller reported raise gives no signal) | `0.5 + 0.5a`, `a = clamp(log10(sold/250,000)/2, 0, 1)` |
 | form_d_filed | Original D, sold 0 or yetToOccur | 0.4, labelled "filed, $0 sold" |
-| form_d_amend | D/A with sold above the previous filing (the named previous accession, else the stored offering; no signal without a known previous amount) | `0.3 + 0.3a` |
+| form_d_amend | D/A with sold above the previous filing (the named previous accession, else the stored offering; no signal without a known previous amount), to a total of at least $100,000 | `0.3 + 0.3a` |
 | hn_post | Thread from the last 45 days | `0.6 + 0.2·funding + 0.2·tool` |
 | jobs_tools | Confirmed board | `0.7·min(1, n_tool/3) + 0.3·min(1, n_new/10)`; migration phrase → 1 |
 | gh_accel | ratio ≥ 2, events ≥ 30, actors ≥ 3, 4 non-zero baseline weeks, domain ≥ medium | `min(1, log2(ratio)/3)` |
@@ -353,7 +353,7 @@ The slices total 13.5 days. If slice 7 slips, the github term scores 0 and the o
 6. Should the filter add Biotechnology and Other Health Care?
 7. Supabase Free with the heartbeat, or Pro (price not checked)?
 8. Resolved: the repo is public (nilhemdot/signal-miner), so Actions minutes are unlimited.
-9. Should tiny raises qualify? `a` clamps to 0 below $250K, so a $5,000 raise scores 21.2 at 7 days and clears the 20 cut. On 2026-11-06, 5 of 14 leads raised under $170K.
+9. Resolved 2026-11-24: a reported raise under $100,000 creates no signal. Before this, `a` clamped to 0 below $250K, so a $5,000 raise scored 21.2 and cleared the cut of 20.
 
 ## 13. Unverified assumptions
 

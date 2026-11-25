@@ -200,3 +200,27 @@ def test_ties_break_on_sources_then_recency_then_company_id(db):
     by_id = sorted(recent, key=str)
     names = {str(c): n for c, n in ((recent[0], "Recent A"), (recent[1], "Recent B"))}
     assert [r.name for r in ranked] == ["Two Sources", names[str(by_id[0])], names[str(by_id[1])], "Older"]
+
+
+# Minimum raise (spec open question 9: a reported raise under $100K creates no signal) -------------
+
+@pytest.mark.parametrize("sold, expected", [
+    (99_999, []),
+    (100_000, [("form_d_raised", 0.5)]),
+    (0, [("form_d_filed", 0.4)]),           # nothing sold yet is still a filing signal
+])
+def test_minimum_raise_for_original_filings(db, sold, expected):
+    sec = FakeSec()
+    sec.add(CIK, "0007000001-26-000001", "D", "021-1", DAY, make_xml(CIK, sold=sold))
+    _run(db, sec, [IndexRow("D", "x", CIK, DAY, "0007000001-26-000001")])
+    assert [(t, float(s)) for t, _r, s in _signals(db)] == expected
+
+
+@pytest.mark.parametrize("new_total, fires", [(90_000, False), (150_000, True)])
+def test_minimum_raise_for_amendments(db, new_total, fires):
+    sec = FakeSec()
+    sec.add(CIK, "0007000001-26-000001", "D", "021-1", date(2026, 10, 15), make_xml(CIK, sold=50_000))
+    sec.add(CIK, "0007000001-26-000002", "D/A", "021-1", DAY,
+            make_xml(CIK, amendment=True, sold=new_total, previous="0007000001-26-000001"))
+    _run(db, sec, [IndexRow("D/A", "x", CIK, DAY, "0007000001-26-000002")])
+    assert ("form_d_amend" in [t for t, _r, _s in _signals(db)]) is fires
